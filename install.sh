@@ -851,6 +851,12 @@ generate_pam_config() {
         cat "$common_snippets/auth-jumpcloud.conf" >> "$output_file"
     fi
 
+    # GNOME Keyring unlock (if enabled) - must come BEFORE sufficient modules
+    # so it can capture the password before the auth stack short-circuits
+    if [ "$ENABLE_GNOME_KEYRING" = true ]; then
+        cat "$common_snippets/keyring-gnome.conf" >> "$output_file"
+    fi
+
     # Alternative auth methods (fingerprint, U2F) - these come before password
     if [ "$ENABLE_FINGERPRINT" = true ]; then
         cat "$common_snippets/auth-fingerprint.conf" >> "$output_file"
@@ -862,11 +868,6 @@ generate_pam_config() {
 
     # Standard password auth (always included)
     cat "$common_snippets/auth-unix.conf" >> "$output_file"
-
-    # GNOME Keyring unlock (if enabled)
-    if [ "$ENABLE_GNOME_KEYRING" = true ]; then
-        cat "$common_snippets/keyring-gnome.conf" >> "$output_file"
-    fi
 
     # Google Authenticator 2FA (if enabled - comes after password)
     if [ "$ENABLE_GOOGLE_AUTH" = true ]; then
@@ -950,6 +951,29 @@ chown root:root /etc/pam.d/greetd
 chmod 644 /etc/pam.d/greetd
 
 success "PAM config generated with selected features"
+
+# Enable authselect features for system-auth integration
+# greetd's PAM config includes system-auth, which is managed by authselect.
+# Without these features enabled, keyring/fingerprint entries in system-auth are missing.
+if command -v authselect &>/dev/null; then
+    CURRENT_FEATURES=$(authselect current 2>/dev/null || true)
+
+    if [ "$ENABLE_GNOME_KEYRING" = true ]; then
+        if ! echo "$CURRENT_FEATURES" | grep -q "with-pam-gnome-keyring"; then
+            info "Enabling authselect feature: with-pam-gnome-keyring"
+            authselect enable-feature with-pam-gnome-keyring 2>/dev/null || \
+                warn "Could not enable authselect gnome-keyring feature"
+        fi
+    fi
+
+    if [ "$ENABLE_FINGERPRINT" = true ]; then
+        if ! echo "$CURRENT_FEATURES" | grep -q "with-fingerprint"; then
+            info "Enabling authselect feature: with-fingerprint"
+            authselect enable-feature with-fingerprint 2>/dev/null || \
+                warn "Could not enable authselect fingerprint feature"
+        fi
+    fi
+fi
 
 info "[11/14] Installing helper scripts..."
 
