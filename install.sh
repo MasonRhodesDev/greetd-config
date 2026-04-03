@@ -684,10 +684,26 @@ else
     info "Greeter user already exists"
 fi
 
-# Add greeter to necessary groups
+# Greeter always needs video/input for compositor
+usermod -a -G video,input greeter
+info "Greeter user added to video and input groups"
+
+# Ensure seat group membership for seatd access
+if getent group seat >/dev/null 2>&1; then
+    usermod -a -G seat greeter
+    info "Greeter user added to seat group"
+
+    if [ -n "$ACTUAL_USER" ] && [ "$ACTUAL_USER" != "root" ]; then
+        usermod -a -G seat "$ACTUAL_USER"
+        info "User $ACTUAL_USER added to seat group"
+    fi
+else
+    info "No seat group found (using logind for seat management)"
+fi
+
+# Add greeter to necessary groups for game mode
 if [ "$ENABLE_GAME_MODE" = true ]; then
-    usermod -a -G input,video greeter
-    info "Greeter user added to input and video groups"
+    info "Game mode: greeter already in input/video groups"
 fi
 
 # ============================================================================
@@ -841,41 +857,31 @@ generate_pam_config() {
     echo >> "$output_file"
 
     # AUTH STACK
+    # Use substack (not include) so that sufficient modules inside system-auth
+    # only terminate the substack, not our parent stack. This allows
+    # pam_gnome_keyring.so to run after authentication succeeds.
     echo "# ============================================================================" >> "$output_file"
     echo "# Authentication" >> "$output_file"
     echo "# ============================================================================" >> "$output_file"
-    cat "$common_snippets/auth-base-preauth.conf" >> "$output_file"
+    echo "auth        substack      system-auth" >> "$output_file"
 
-    # JumpCloud (if enabled)
+    # JumpCloud account check (if enabled) — runs after auth succeeds
     if [ "$ENABLE_JUMPCLOUD" = true ]; then
         cat "$common_snippets/auth-jumpcloud.conf" >> "$output_file"
     fi
 
-    # GNOME Keyring unlock (if enabled) - must come BEFORE sufficient modules
-    # so it can capture the password before the auth stack short-circuits
-    if [ "$ENABLE_GNOME_KEYRING" = true ]; then
-        cat "$common_snippets/keyring-gnome.conf" >> "$output_file"
-    fi
-
-    # Alternative auth methods (fingerprint, U2F) - these come before password
-    if [ "$ENABLE_FINGERPRINT" = true ]; then
-        cat "$common_snippets/auth-fingerprint.conf" >> "$output_file"
-    fi
-
+    # Additional MFA after password (if enabled)
     if [ "$ENABLE_U2F" = true ]; then
         cat "$common_snippets/auth-u2f.conf" >> "$output_file"
     fi
-
-    # Standard password auth (always included)
-    cat "$common_snippets/auth-unix.conf" >> "$output_file"
-
-    # Google Authenticator 2FA (if enabled - comes after password)
     if [ "$ENABLE_GOOGLE_AUTH" = true ]; then
         cat "$common_snippets/auth-google-authenticator.conf" >> "$output_file"
     fi
 
-    # Auth postauth (faillock + deny)
-    cat "$common_snippets/auth-postauth.conf" >> "$output_file"
+    # Keyring unlock — MUST be last in auth stack so PAM_AUTHTOK is set
+    if [ "$ENABLE_GNOME_KEYRING" = true ]; then
+        cat "$common_snippets/keyring-gnome.conf" >> "$output_file"
+    fi
     echo >> "$output_file"
 
     # ACCOUNT STACK
@@ -973,6 +979,23 @@ if command -v authselect &>/dev/null; then
                 warn "Could not enable authselect fingerprint feature"
         fi
     fi
+fi
+
+# Enable gnome-keyring systemd user units globally so PAM and systemd use the
+# same daemon instance. Without this, PAM spawns --daemonize --login while
+# systemd socket-activates a separate --foreground daemon; they don't share the
+# unlocked password, so login.keyring is never created and apps prompt for a
+# new keyring password.
+if [ "$ENABLE_GNOME_KEYRING" = true ]; then
+    info "Enabling gnome-keyring systemd user units globally..."
+    UNIT_DIR="/etc/systemd/user"
+    mkdir -p "$UNIT_DIR/sockets.target.wants"
+    mkdir -p "$UNIT_DIR/default.target.wants"
+    ln -sf /usr/lib/systemd/user/gnome-keyring-daemon.socket \
+        "$UNIT_DIR/sockets.target.wants/gnome-keyring-daemon.socket"
+    ln -sf /usr/lib/systemd/user/gnome-keyring-daemon.service \
+        "$UNIT_DIR/default.target.wants/gnome-keyring-daemon.service"
+    success "gnome-keyring systemd units enabled for all users"
 fi
 
 info "[11/14] Installing helper scripts..."
@@ -1103,6 +1126,17 @@ info "  - Background image: /etc/greetd/bg.png → $SCRIPT_DIR/assets/wallpaper.
 info "  - Session auto-discovery from /usr/share/{wayland-sessions,xsessions}"
 info "  - Configuration: /etc/greetd/regreet.toml → $SCRIPT_DIR/config/regreet.toml"
 info "  - Hyprland config: /etc/greetd/hypr.conf (rendered from template)"
+
+if [ "$ENABLE_GNOME_KEYRING" = true ]; then
+    echo
+    info "GNOME Keyring:"
+    info "  - Auto-unlocks at login via PAM (synced to login password)"
+    info "  - Systemd user units enabled globally (/etc/systemd/user/)"
+    info "  - login.keyring created on first secret storage after login"
+    if [ -n "$ACTUAL_USER" ] && [ "$ACTUAL_USER" != "root" ]; then
+        info "  - User $ACTUAL_USER added to seat group (required for Wayland compositor)"
+    fi
+fi
 
 # Post-install setup instructions for authentication methods
 NEEDS_SETUP=false
