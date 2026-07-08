@@ -33,6 +33,33 @@ The installer symlinks static config files from this repo into `/etc/greetd/`, s
 - `mode-game.toml` — interpolates auto-login username
 - `/etc/pam.d/greetd` — assembled from `config/pam-snippets/` based on selected features
 
+End to end:
+
+```mermaid
+flowchart TD
+    subgraph install ["Install time — /opt/greetd-config/install.sh"]
+        repo["/opt/greetd-config"]
+        repo -->|"symlink: mode-desktop.toml, regreet.toml, regreet.css,<br/>regreet-launcher.sh, environments, scripts/*,<br/>wallpaper as /etc/greetd/bg.png"| etcgreetd["/etc/greetd/"]
+        repo -->|"render config/hypr.conf.tmpl<br/>(hostname-conditional monitor block)"| hyprconf["/etc/greetd/hypr.conf"]
+        repo -->|"interpolate autologin user"| modegame["/etc/greetd/mode-game.toml"]
+        snippets["config/pam-snippets/<br/>auth-unix / fingerprint / google-authenticator / u2f / jumpcloud<br/>+ arch/ and fedora/ overrides"] -->|"assemble per selected features<br/>(authselect features on Fedora)"| pamfile["/etc/pam.d/greetd"]
+    end
+
+    subgraph runtime ["Runtime"]
+        greetd["greetd"] -->|"/etc/greetd/config.toml points at<br/>mode-desktop.toml or mode-game.toml"| hyprland["Hyprland greeter compositor<br/>(start-hyprland -- --config /etc/greetd/hypr.conf)"]
+        hyprland -->|exec-once| regreet["regreet (GTK4)"]
+        regreet -->|"credentials via greetd IPC"| pam["PAM stack /etc/pam.d/greetd"]
+        pam -->|"auth OK"| session["user session"]
+        gamemode["systemd/game-mode.service<br/>(gamepad detection)"] -.->|"swap config.toml to mode-game.toml,<br/>restart greetd"| greetd
+        greetd -.->|"mode-game.toml: autologin,<br/>gamescope + Steam"| gamesession["game session<br/>(scripts/game-mode-wrapper.sh optional)"]
+    end
+
+    etcgreetd --> greetd
+    hyprconf --> hyprland
+    pamfile --> pam
+    modegame --> greetd
+```
+
 ## Features
 
 - **Greeter**: regreet (GTK4) running under Hyprland compositor
